@@ -42,6 +42,7 @@ add_custom_target(uninstall COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_D
 
 # Could compile on any UNIX system, but will only work on Linux
 if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+  add_subdirectory(cray-pm)
   add_subdirectory(msr)
 
   find_package(PkgConfig)
