@@ -1,0 +1,61 @@
+Source: raplcap
+Maintainer: Connor Imes <ckimes@ubuntu.com>
+Section: admin
+Priority: optional
+Build-Depends: debhelper (>= 10),
+               cmake,
+               pkg-config,
+               libpowercap-dev
+Standards-Version: 4.1.1
+Vcs-Browser: https://github.com/connorimes/raplcap/tree/debian
+Vcs-Git: https://github.com/connorimes/raplcap.git -b debian
+Homepage: https://github.com/powercap/raplcap
+
+Package: raplcap-utils
+Architecture: i386 amd64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         libraplcap-msr0 (= ${binary:Version}),
+         libraplcap-powercap0 (= ${binary:Version})
+Description: Utilities for managing Intel RAPL power caps
+ Specifically, it provides the rapl-configure-msr and rapl-configure-
+ powercap binaries.
+ Both binaries provide the same interface but uses different RAPLCap backends.
+
+Package: libraplcap-msr0
+Architecture: i386 amd64
+Multi-Arch: same
+Section: libs
+Depends: ${shlibs:Depends},
+         ${misc:Depends}
+Recommends: raplcap-utils (= ${binary:Version})
+Description: Shared library for managing RAPL configurations using the msr kernel module
+ This implementation of the RAPLCap interface uses Intel's Model-Specific
+ Registers via the Linux msr kernel module. It is designed to work with
+ processors supporting Intel 64 and IA-32 architectures.
+
+Package: libraplcap-powercap0
+Architecture: i386 amd64
+Multi-Arch: same
+Section: libs
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         libpowercap0
+Recommends: raplcap-utils (= ${binary:Version})
+Description: Shared library for managing RAPL configurations using the powercap interface
+ This implementation of the RAPLCap interface uses the powercap sysfs
+ driver provided by the intel_rapl kernel module. It is designed to work
+ with any processors supported by the kernel module.
+
+Package: libraplcap-dev
+Architecture: i386 amd64
+Multi-Arch: same
+Section: libdevel
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         libraplcap-msr0 (= ${binary:Version}),
+         libraplcap-powercap0 (= ${binary:Version})
+Description: Development files for libraplcap
+ This package provides everything needed to develop other programs and
+ libraries with libraplcap-msr0 and libraplcap-powercap0, including
+ header files and pkg-config configurations.
