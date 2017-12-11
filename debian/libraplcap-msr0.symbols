@@ -1,9 +1,9 @@
 libraplcap-msr.so.0 libraplcap-msr0 #MINVER#
- raplcap_destroy@Base 0.1.2
- raplcap_get_limits@Base 0.1.2
- raplcap_get_num_sockets@Base 0.1.2
- raplcap_init@Base 0.1.2
- raplcap_is_zone_enabled@Base 0.1.2
- raplcap_is_zone_supported@Base 0.1.2
- raplcap_set_limits@Base 0.1.2
- raplcap_set_zone_enabled@Base 0.1.2
+ raplcap_destroy@Base 0.2.0
+ raplcap_get_limits@Base 0.2.0
+ raplcap_get_num_sockets@Base 0.2.0
+ raplcap_init@Base 0.2.0
+ raplcap_is_zone_enabled@Base 0.2.0
+ raplcap_is_zone_supported@Base 0.2.0
+ raplcap_set_limits@Base 0.2.0
+ raplcap_set_zone_enabled@Base 0.2.0

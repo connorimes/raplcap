@@ -1,5 +1,5 @@
-raplcap (0.1.2-1) unstable; urgency=medium
+raplcap (0.2.0-1) unstable; urgency=medium
 
   * Initial release. (Closes: #XXXXXX)
 
- -- Connor Imes <ckimes@ubuntu.com>  Wed, 29 Nov 2017 11:00:45 -0800
+ -- Connor Imes <ckimes@ubuntu.com>  Mon, 11 Dec 2017 10:09:45 -0800
