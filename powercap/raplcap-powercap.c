@@ -17,9 +17,11 @@
 
 #define MAX_PKG_NAME_SIZE 16
 
+#define HAS_SHORT_TERM(zone) (zone == RAPLCAP_ZONE_PACKAGE || zone == RAPLCAP_ZONE_PSYS)
+
 static raplcap rc_default;
 
-static powercap_rapl_pkg* get_pkg_zone(uint32_t socket, const raplcap* rc, raplcap_zone zone, powercap_rapl_zone* z) {
+static powercap_rapl_pkg* get_pkg_zone(const raplcap* rc, uint32_t socket, raplcap_zone zone, powercap_rapl_zone* z) {
   assert(z != NULL);
   static const powercap_rapl_zone POWERCAP_RAPL_ZONES[] = {
     POWERCAP_RAPL_ZONE_PACKAGE, // RAPLCAP_ZONE_PACKAGE
@@ -31,13 +33,19 @@ static powercap_rapl_pkg* get_pkg_zone(uint32_t socket, const raplcap* rc, raplc
   if (rc == NULL) {
     rc = &rc_default;
   }
+  if (rc->nsockets == 0 || rc->state == NULL) {
+    // unfortunately can't detect if the context just contains garbage
+    raplcap_log(ERROR, "get_pkg_zone: Context is not initialized\n");
+    errno = EINVAL;
+    return NULL;
+  }
   if (socket >= rc->nsockets) {
     raplcap_log(ERROR, "get_pkg_zone: Socket %"PRIu32" not in range [0, %"PRIu32")\n", socket, rc->nsockets);
     errno = EINVAL;
     return NULL;
   }
   if ((int) zone < 0 || (int) zone > RAPLCAP_ZONE_PSYS) {
-    raplcap_log(ERROR, "get_pkg_zone: Unknown zone: %d\n", *z);
+    raplcap_log(ERROR, "get_pkg_zone: Unknown zone: %d\n", zone);
     errno = EINVAL;
     return NULL;
   }
@@ -60,7 +68,7 @@ static int sort_pkgs(const void* a, const void* b) {
   int ret;
   if (powercap_rapl_get_name((const powercap_rapl_pkg*) a, POWERCAP_RAPL_ZONE_PACKAGE, name_a, sizeof(name_a)) >= 0 &&
       powercap_rapl_get_name((const powercap_rapl_pkg*) b, POWERCAP_RAPL_ZONE_PACKAGE, name_b, sizeof(name_b)) >= 0) {
-    // names should be of the form "package-N"
+    // assumes names are in the form "package-N" and 0 <= N < 10 (N >= 10 would need more advanced parsing)
     if ((ret = strncmp(name_a, name_b, sizeof(name_a))) > 0) {
       raplcap_log(DEBUG, "sort_pkgs: Packages are out of order\n");
     }
@@ -86,6 +94,7 @@ int raplcap_init(raplcap* rc) {
   }
   if ((pkgs = malloc(rc->nsockets * sizeof(powercap_rapl_pkg))) == NULL) {
     raplcap_perror(ERROR, "raplcap_init: malloc");
+    rc->nsockets = 0;
     return -1;
   }
   rc->state = pkgs;
@@ -128,8 +137,8 @@ int raplcap_destroy(raplcap* rc) {
     }
     free(rc->state);
     rc->state = NULL;
-    rc->nsockets = 0;
   }
+  rc->nsockets = 0;
   raplcap_log(DEBUG, "raplcap_destroy: Destroyed\n");
   errno = err_save;
   return err_save ? -1 : 0;
@@ -142,9 +151,9 @@ uint32_t raplcap_get_num_sockets(const raplcap* rc) {
   return rc->nsockets == 0 ? get_powercap_sockets() : rc->nsockets;
 }
 
-int raplcap_is_zone_supported(uint32_t socket, const raplcap* rc, raplcap_zone zone) {
+int raplcap_is_zone_supported(const raplcap* rc, uint32_t socket, raplcap_zone zone) {
   powercap_rapl_zone z;
-  const powercap_rapl_pkg* pkg = get_pkg_zone(socket, rc, zone, &z);
+  const powercap_rapl_pkg* pkg = get_pkg_zone(rc, socket, zone, &z);
   int ret;
   if (pkg == NULL) {
     ret = -1;
@@ -155,9 +164,9 @@ int raplcap_is_zone_supported(uint32_t socket, const raplcap* rc, raplcap_zone z
   return ret;
 }
 
-int raplcap_is_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zone) {
+int raplcap_is_zone_enabled(const raplcap* rc, uint32_t socket, raplcap_zone zone) {
   powercap_rapl_zone z;
-  const powercap_rapl_pkg* pkg = get_pkg_zone(socket, rc, zone, &z);
+  const powercap_rapl_pkg* pkg = get_pkg_zone(rc, socket, zone, &z);
   int ret;
   if (pkg == NULL) {
     ret = -1;
@@ -168,9 +177,9 @@ int raplcap_is_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zon
   return ret;
 }
 
-int raplcap_set_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zone, int enabled) {
+int raplcap_set_zone_enabled(const raplcap* rc, uint32_t socket, raplcap_zone zone, int enabled) {
   powercap_rapl_zone z;
-  const powercap_rapl_pkg* pkg = get_pkg_zone(socket, rc, zone, &z);
+  const powercap_rapl_pkg* pkg = get_pkg_zone(rc, socket, zone, &z);
   int ret;
   if (pkg == NULL) {
     ret = -1;
@@ -205,16 +214,17 @@ static int get_constraint(const powercap_rapl_pkg* pkg, powercap_rapl_zone z,
   return 0;
 }
 
-int raplcap_get_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
+int raplcap_get_limits(const raplcap* rc, uint32_t socket, raplcap_zone zone,
                        raplcap_limit* limit_long, raplcap_limit* limit_short) {
   powercap_rapl_zone z;
-  const powercap_rapl_pkg* pkg = get_pkg_zone(socket, rc, zone, &z);
+  const powercap_rapl_pkg* pkg = get_pkg_zone(rc, socket, zone, &z);
   if (pkg == NULL) {
     return -1;
   }
   raplcap_log(DEBUG, "raplcap_get_limits: socket=%"PRIu32", zone=%d\n", socket, zone);
   if ((limit_long != NULL && get_constraint(pkg, z, POWERCAP_RAPL_CONSTRAINT_LONG, limit_long)) ||
-      (limit_short != NULL && get_constraint(pkg, z, POWERCAP_RAPL_CONSTRAINT_SHORT, limit_short))) {
+      (limit_short != NULL && HAS_SHORT_TERM(zone) &&
+       get_constraint(pkg, z, POWERCAP_RAPL_CONSTRAINT_SHORT, limit_short))) {
     return -1;
   }
   return 0;
@@ -241,16 +251,17 @@ static int set_constraint(const powercap_rapl_pkg* pkg, powercap_rapl_zone z,
   return 0;
 }
 
-int raplcap_set_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
+int raplcap_set_limits(const raplcap* rc, uint32_t socket, raplcap_zone zone,
                        const raplcap_limit* limit_long, const raplcap_limit* limit_short) {
   powercap_rapl_zone z;
-  const powercap_rapl_pkg* pkg = get_pkg_zone(socket, rc, zone, &z);
+  const powercap_rapl_pkg* pkg = get_pkg_zone(rc, socket, zone, &z);
   if (pkg == NULL) {
     return -1;
   }
   raplcap_log(DEBUG, "raplcap_set_limits: socket=%"PRIu32", zone=%d\n", socket, zone);
   if ((limit_long != NULL && set_constraint(pkg, z, POWERCAP_RAPL_CONSTRAINT_LONG, limit_long)) ||
-      (limit_short != NULL && set_constraint(pkg, z, POWERCAP_RAPL_CONSTRAINT_SHORT, limit_short))) {
+      (limit_short != NULL && HAS_SHORT_TERM(zone) &&
+       set_constraint(pkg, z, POWERCAP_RAPL_CONSTRAINT_SHORT, limit_short))) {
     return -1;
   }
   return 0;

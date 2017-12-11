@@ -7,7 +7,7 @@
  * @author Connor Imes
  * @date 2016-10-19
  */
-// for popen, pread, pwrite
+// for popen, pread, pwrite, sysconf
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <errno.h>
@@ -66,24 +66,28 @@ static int open_msr(uint32_t core, int flags) {
   return fd;
 }
 
-static int read_msr_by_offset(int fd, off_t msr, uint64_t* data) {
+static int read_msr_by_offset(int fd, off_t msr, uint64_t* data, int silent) {
   assert(msr >= 0);
   assert(data != NULL);
   if (pread(fd, data, sizeof(uint64_t), msr) == sizeof(uint64_t)) {
     raplcap_log(DEBUG, "read_msr_by_offset: msr=0x%lX, data=0x%016lX\n", msr, *data);
     return 0;
   }
-  raplcap_log(ERROR, "read_msr_by_offset(0x%lX): pread: %s\n", msr, strerror(errno));
+  if (!silent) {
+    raplcap_log(ERROR, "read_msr_by_offset(0x%lX): pread: %s\n", msr, strerror(errno));
+  }
   return -1;
 }
 
-static int write_msr_by_offset(int fd, off_t msr, uint64_t data) {
+static int write_msr_by_offset(int fd, off_t msr, uint64_t data, int silent) {
   assert(msr >= 0);
   raplcap_log(DEBUG, "write_msr_by_offset: msr=0x%lX, data=0x%016lX\n", msr, data);
   if (pwrite(fd, &data, sizeof(uint64_t), msr) == sizeof(uint64_t)) {
     return 0;
   }
-  raplcap_log(ERROR, "write_msr_by_offset(0x%lX): pwrite: %s\n", msr, strerror(errno));
+  if (!silent) {
+    raplcap_log(ERROR, "write_msr_by_offset(0x%lX): pwrite: %s\n", msr, strerror(errno));
+  }
   return -1;
 }
 
@@ -103,95 +107,125 @@ static off_t zone_to_msr_offset(raplcap_zone zone) {
   return ZONE_OFFSETS[zone];
 }
 
-static uint32_t count_sockets(void) {
-  uint32_t sockets = 0;
-  int err_save;
-  char output[32];
-  // hacky, but seems to work
-  FILE* fp = popen("grep '^physical id' /proc/cpuinfo | sort -u | wc -l", "r");
-  if (fp == NULL) {
-    raplcap_perror(ERROR, "count_sockets: popen");
+static uint32_t get_cpu_count(void) {
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  if (n <= 0 || n > UINT32_MAX) {
+    errno = ENODEV;
     return 0;
   }
-  if (fgets(output, sizeof(output), fp) == NULL) {
-    // got nothing back from the process? shouldn't happen...
-    raplcap_log(ERROR, "count_sockets: No data to parse from process output\n");
-    errno = ENODATA;
+  return (uint32_t) n;
+}
+
+static int get_cpu_to_socket_mapping(uint32_t* cpu_to_socket, uint32_t ncpus) {
+  // assumes cpus are numbered from 0 to ncpus-1
+  assert(cpu_to_socket != NULL);
+  assert(ncpus > 0);
+  char fname[92] = { 0 };
+  FILE* f;
+  uint32_t i;
+  int fret;
+  for (i = 0; i < ncpus; i++) {
+    // phys socket IDs may not be in range [0, nsockets), see kernel docs: Documentation/cputopology.txt
+    snprintf(fname, sizeof(fname), "/sys/devices/system/cpu/cpu%"PRIu32"/topology/physical_package_id", i);
+    if ((f = fopen(fname, "r")) == NULL) {
+      raplcap_perror(ERROR, fname);
+      return -1;
+    }
+    fret = fscanf(f, "%"PRIu32, &cpu_to_socket[i]);
+    if (fclose(f)) {
+      raplcap_perror(WARN, "get_cpu_to_socket_mapping: fclose");
+    }
+    if (fret != 1) {
+      raplcap_log(ERROR, "get_cpu_to_socket_mapping: Failed to read physical_package_id for cpu%"PRIu32"\n", i);
+      errno = ENODATA;
+      return -1;
+    }
+    raplcap_log(DEBUG, "get_cpu_to_socket_mapping: cpu=%"PRIu32", phys_socket=%"PRIu32"\n", i, cpu_to_socket[i]);
+  }
+  return 0;
+}
+
+static int cmp_u32(const void* a, const void* b) {
+  return *((const uint32_t*) a) > *((const uint32_t*) b) ? 1 :
+         ((*((const uint32_t*) a) < *((const uint32_t*) b)) ? -1 : 0);
+}
+
+// Count unique entries in arr. Sorts in place using arr if sort_buf is NULL; arr is untouched if sort_buf is not NULL
+static uint32_t count_unique_u32(uint32_t* arr, uint32_t n, uint32_t* sort_buf) {
+  // the alternative to using a sorted buffer is an O(n^2) approach
+  assert(arr != NULL);
+  assert(arr != sort_buf);
+  assert(n > 0);
+  uint32_t unique = 1;
+  uint32_t i;
+  if (sort_buf == NULL) {
+    sort_buf = arr;
   } else {
-    errno = 0;
-    sockets = strtoul(output, NULL, 0);
-    if (errno) {
-      raplcap_perror(ERROR, "count_sockets: strtoul");
-      sockets = 0;
-    } else if (sockets == 0) {
-      // would occur if grep didn't find anything, which shouldn't happen, but we'll just say there's no such device
-      raplcap_log(ERROR, "count_sockets: no result from grep\n");
-      errno = ENODEV;
+    memcpy(sort_buf, arr, n * sizeof(uint32_t));
+  }
+  qsort(sort_buf, n, sizeof(uint32_t), cmp_u32);
+  for (i = 1; i < n; i++) {
+    if (sort_buf[i] != sort_buf[i - 1]) {
+      unique++;
     }
   }
-  err_save = errno;
-  if (pclose(fp)) {
-    raplcap_perror(WARN, "count_sockets: pclose");
+  return unique;
+}
+
+// Get the minimum value in arr where value > gt. Returns UINT32_MAX if none found.
+// If 0 is allowed to be the smallest value, set gt = UINT32_MAX
+static uint32_t min_gt_u32(uint32_t* arr, uint32_t n, uint32_t gt) {
+  uint32_t min = UINT32_MAX;
+  uint32_t i;
+  for (i = 0; i < n; i++) {
+    if (arr[i] < min && (gt == UINT32_MAX || arr[i] > gt)) {
+      min = arr[i];
+    }
   }
-  errno = err_save;
-  raplcap_log(DEBUG, "count_sockets: sockets=%"PRIu32"\n", sockets);
-  return sockets;
+  return min;
+}
+
+// Normalize an array in place s.t. final values are in range [0, nidx) but order is retained.
+// nidx MUST be the total number of unique entries in arr (see count_unique_u32(...)).
+// e.g., [1, 4, 3, 4, 1, 9] (nidx = 4) becomes [0, 2, 1, 2, 0, 3]
+static void normalize_to_indexes(uint32_t* arr, uint32_t narr, uint32_t nidx) {
+  uint32_t last_min = UINT32_MAX;
+  uint32_t i, j;
+  for (i = 0; i < nidx; i++) {
+    last_min = min_gt_u32(arr, narr, last_min);
+    for (j = 0; j < narr; j++) {
+      if (arr[j] == last_min) {
+        arr[j] = i;
+      }
+    }
+  }
 }
 
 // Note: doesn't close previously opened file descriptors if one fails to open
-static int raplcap_open_msrs(uint32_t sockets, int* fds) {
-  // need to find a core for each socket
-  assert(sockets > 0);
+static int open_msrs(int* fds, uint32_t nsockets, uint32_t* cpu_to_socket, uint32_t ncpus) {
+  // fds must be all 0s to begin
+  (void) nsockets;
   assert(fds != NULL);
-  char output[32];
-  uint32_t socket;
-  uint32_t core;
-  int ret = 0;
-  int err_save;
+  assert(nsockets > 0);
+  assert(cpu_to_socket != NULL);
+  assert(ncpus > 0);
+  uint32_t i;
   const char* env_ro = getenv(ENV_RAPLCAP_READ_ONLY);
   int ro = env_ro == NULL ? 0 : atoi(env_ro);
-  // hacky, but not as bad as before...
-  FILE* fp = popen("egrep '^processor|^physical id' /proc/cpuinfo | cut -d : -f 2 | paste - - | sort -u -k 2", "r");
-  if (fp == NULL) {
-    raplcap_perror(ERROR, "raplcap_open_msrs: popen");
-    return -1;
-  }
-  // first column of the output is the core id, second column is the socket
-  while (fgets(output, sizeof(output), fp) != NULL) {
-    if (sscanf(output, "%"PRIu32" %"PRIu32, &core, &socket) != 2) {
-      raplcap_log(ERROR, "raplcap_open_msrs: Failed to parse socket to MSR mapping\n");
-      ret = -1;
-      errno = ENOENT;
-      break;
+  for (i = 0; i < ncpus; i++) {
+    // must have translated from physical socket value to index (see normalize_to_indexes(...))
+    assert(cpu_to_socket[i] < nsockets);
+    if (fds[cpu_to_socket[i]] > 0) {
+      // already opened msr for this socket
+      continue;
     }
-    raplcap_log(DEBUG, "raplcap_open_msrs: Found mapping: socket %"PRIu32", core %"PRIu32"\n", socket, core);
-    if (socket >= sockets) {
-      raplcap_log(ERROR, "raplcap_open_msrs: Socket %"PRIu32" is outside range [0, %"PRIu32")\n", socket, sockets);
-      ret = -1;
-      errno = ERANGE;
-      break;
-    }
+    raplcap_log(DEBUG, "open_msrs: Found mapping: cpu=%"PRIu32", socket_idx=%"PRIu32"\n", i, cpu_to_socket[i]);
     // open the cpu MSR for this socket
-    if ((fds[socket] = open_msr(core, ro == 0 ? O_RDWR : O_RDONLY)) < 0) {
-      ret = -1;
-      break;
+    if ((fds[cpu_to_socket[i]] = open_msr(i, ro == 0 ? O_RDWR : O_RDONLY)) < 0) {
+      return -1;
     }
   }
-  err_save = errno;
-  if (pclose(fp)) {
-    raplcap_perror(WARN, "raplcap_open_msrs: pclose");
-  }
-  errno = err_save;
-  // verify that we actually found a MSR for each socket (requires the fds was previously zeroed-out)
-  for (socket = 0; ret == 0 && socket < sockets; socket++) {
-    if (fds[socket] <= 0) {
-      raplcap_log(ERROR, "raplcap_open_msrs: No MSR found for socket %"PRIu32"\n", socket);
-      ret = -1;
-      errno = ENOENT;
-      break;
-    }
-  }
-  return ret;
+  return 0;
 }
 
 static uint64_t pow2_u64(uint64_t y) {
@@ -212,33 +246,53 @@ int raplcap_init(raplcap* rc) {
   if (rc == NULL) {
     rc = &rc_default;
   }
-  raplcap_msr* state;
+  uint32_t* cpu_to_socket = NULL;
+  raplcap_msr* state = NULL;
   uint64_t msrval;
+  uint32_t ncpus;
   int err_save;
-  if ((rc->nsockets = count_sockets()) == 0) {
+  if ((ncpus = get_cpu_count()) == 0) {
+    raplcap_perror(ERROR, "raplcap_init: get_cpu_count");
     return -1;
   }
-  if ((state = malloc(sizeof(raplcap_msr))) == NULL) {
+  // second half of the buffer is for duplicating/sorting socket mappings in count_unique_u32(...)
+  if ((cpu_to_socket = malloc(2 * ncpus * sizeof(uint32_t))) == NULL ||
+      (state = malloc(sizeof(raplcap_msr))) == NULL) {
     raplcap_perror(ERROR, "raplcap_init: malloc");
-    return -1;
+    goto init_fail;
   }
+  if (get_cpu_to_socket_mapping(cpu_to_socket, ncpus)) {
+    goto init_fail;
+  }
+  rc->nsockets = count_unique_u32(cpu_to_socket, ncpus, (cpu_to_socket + ncpus));
+  raplcap_log(DEBUG, "raplcap_init: ncpus=%"PRIu32", sockets=%"PRIu32"\n", ncpus, rc->nsockets);
   if ((state->fds = calloc(rc->nsockets, sizeof(int))) == NULL) {
     raplcap_perror(ERROR, "raplcap_init: calloc");
-    free(state);
-    return -1;
+    goto init_fail;
   }
+  // map cpu IDs to socket indexes; physical socket IDs may not be in range [0, nsockets), so we enforce this
+  normalize_to_indexes(cpu_to_socket, ncpus, rc->nsockets);
+  raplcap_log(DEBUG, "raplcap_init: normalized physical socket IDs to indexes, opening MSRs...\n");
   rc->state = state;
-  if (raplcap_open_msrs(rc->nsockets, state->fds) ||
-      read_msr_by_offset(state->fds[0], MSR_RAPL_POWER_UNIT, &msrval)) {
+  if (open_msrs(state->fds, rc->nsockets, cpu_to_socket, ncpus) ||
+      read_msr_by_offset(state->fds[0], MSR_RAPL_POWER_UNIT, &msrval, 0)) {
     err_save = errno;
     raplcap_destroy(rc);
+    free(cpu_to_socket);
     errno = err_save;
     return -1;
   }
+  free(cpu_to_socket);
   state->power_units = 1.0 / pow2_u64(msrval & 0xf);
   state->time_units = 1.0 / pow2_u64((msrval >> 16) & 0xf);
   raplcap_log(DEBUG, "raplcap_init: Initialized\n");
   return 0;
+
+init_fail:
+  free(state);
+  free(cpu_to_socket);
+  rc->nsockets = 0;
+  return -1;
 }
 
 int raplcap_destroy(raplcap* rc) {
@@ -260,23 +314,50 @@ int raplcap_destroy(raplcap* rc) {
     free(state);
     rc->state = NULL;
   }
+  rc->nsockets = 0;
   raplcap_log(DEBUG, "raplcap_destroy: Destroyed\n");
   errno = err_save;
   return err_save ? -1 : 0;
 }
 
 uint32_t raplcap_get_num_sockets(const raplcap* rc) {
+  uint32_t* cpu_to_socket;
+  uint32_t ncpus;
+  uint32_t nsockets = 0;
   if (rc == NULL) {
     rc = &rc_default;
   }
-  return rc->nsockets == 0 ? count_sockets() : rc->nsockets;
+  if (rc->nsockets > 0) {
+    return rc->nsockets;
+  }
+  if ((ncpus = get_cpu_count()) == 0) {
+    raplcap_perror(ERROR, "raplcap_get_num_sockets: get_cpu_count");
+    return 0;
+  }
+  if ((cpu_to_socket = malloc(ncpus * sizeof(uint32_t))) == NULL) {
+    raplcap_perror(ERROR, "raplcap_get_num_sockets: malloc");
+    return 0;
+  }
+  if (!get_cpu_to_socket_mapping(cpu_to_socket, ncpus)) {
+    nsockets = count_unique_u32(cpu_to_socket, ncpus, NULL);
+    raplcap_log(DEBUG, "raplcap_get_num_sockets: ncpus=%"PRIu32", nsockets=%"PRIu32"\n", ncpus, nsockets);
+  }
+  free(cpu_to_socket);
+  return nsockets;
 }
 
 static raplcap_msr* get_state(uint32_t socket, const raplcap* rc) {
   if (rc == NULL) {
     rc = &rc_default;
   }
-  if (rc->state == NULL || socket >= rc->nsockets) {
+  if (rc->nsockets == 0 || rc->state == NULL) {
+    // unfortunately can't detect if the context just contains garbage
+    raplcap_log(ERROR, "get_state: Context is not initialized\n");
+    errno = EINVAL;
+    return NULL;
+  }
+  if (socket >= rc->nsockets) {
+    raplcap_log(ERROR, "get_state: Socket %"PRIu32" not in range [0, %"PRIu32")\n", socket, rc->nsockets);
     errno = EINVAL;
     return NULL;
   }
@@ -298,54 +379,69 @@ static uint64_t replace_bits(uint64_t msrval, uint64_t data, uint8_t first, uint
   return (msrval & ~mask) | ((data << first) & mask);
 }
 
-static int is_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zone, int silent) {
+static int is_zone_enabled(const raplcap* rc, uint32_t socket, raplcap_zone zone, int silent) {
   uint64_t msrval;
   const raplcap_msr* state = get_state(socket, rc);
   const off_t msr = zone_to_msr_offset(zone);
   int ret;
-  if (state == NULL || msr < 0 || read_msr_by_offset(state->fds[socket], msr, &msrval)) {
+  if (state == NULL || msr < 0 || read_msr_by_offset(state->fds[socket], msr, &msrval, silent)) {
     return -1;
   }
-  ret = get_bits(msrval, 15, 16) == 0x3 && (HAS_SHORT_TERM(zone) ? get_bits(msrval, 47, 48) == 0x3 : 1);
-  if (!ret && get_bits(msrval, 15, 15) == 0x1 && (HAS_SHORT_TERM(zone) ? get_bits(msrval, 47, 47) == 0x1 : 1)) {
-    if (!silent) {
-      raplcap_log(WARN, "Zone is enabled but clamping is not - use raplcap_set_zone_enabled(...) to enable clamping\n");
-    }
-    ret = 1;
+  ret = get_bits(msrval, 15, 15) == 0x1 && (HAS_SHORT_TERM(zone) ? get_bits(msrval, 47, 47) == 0x1 : 1);
+  if (ret && !silent &&
+      (get_bits(msrval, 16, 16) == 0x0 || (HAS_SHORT_TERM(zone) && get_bits(msrval, 48, 48) == 0x0))) {
+    raplcap_log(INFO, "Zone is enabled but clamping is not\n");
   }
   raplcap_log(DEBUG, "is_zone_enabled: socket=%"PRIu32", zone=%d, enabled=%d\n", socket, zone, ret);
   return ret;
 }
 
-int raplcap_is_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zone) {
-  return is_zone_enabled(socket, rc, zone, 0);
+int raplcap_is_zone_enabled(const raplcap* rc, uint32_t socket, raplcap_zone zone) {
+  return is_zone_enabled(rc, socket, zone, 0);
 }
 
-int raplcap_is_zone_supported(uint32_t socket, const raplcap* rc, raplcap_zone zone) {
-  int ret = is_zone_enabled(socket, rc, zone, 1);
+int raplcap_is_zone_supported(const raplcap* rc, uint32_t socket, raplcap_zone zone) {
+  int ret = is_zone_enabled(rc, socket, zone, 1);
   // I/O error indicates zone is not supported, otherwise it's some other error (e.g. EINVAL)
-  if (ret == 0 || (ret < 0 && errno == EIO)) {
+  if (ret == 0) {
     ret = 1;
+  } else if (ret < 0) {
+    if (errno == EIO) {
+      ret = 0;
+    } else if (errno != EINVAL) {
+      raplcap_perror(ERROR, "raplcap_is_zone_supported: is_zone_enabled");
+    }
   }
   raplcap_log(DEBUG, "raplcap_is_zone_supported: socket=%"PRIu32", zone=%d, supported=%d\n", socket, zone, ret);
   return ret;
 }
 
 // Enables or disables both the "enable" and "clamping" bits for all constraints
-int raplcap_set_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zone, int enabled) {
+int raplcap_set_zone_enabled(const raplcap* rc, uint32_t socket, raplcap_zone zone, int enabled) {
   uint64_t msrval;
-  const uint64_t enabled_bits = enabled ? 0x3 : 0x0;
+  const uint64_t enabled_bits = enabled ? 0x1 : 0x0;
   const raplcap_msr* state = get_state(socket, rc);
   const off_t msr = zone_to_msr_offset(zone);
-  if (state == NULL || msr < 0 || read_msr_by_offset(state->fds[socket], msr, &msrval)) {
+  int ret;
+  if (state == NULL || msr < 0 || read_msr_by_offset(state->fds[socket], msr, &msrval, 0)) {
     return -1;
   }
-  msrval = replace_bits(msrval, enabled_bits, 15, 16);
+  msrval = replace_bits(msrval, enabled_bits, 15, 15);
   if (HAS_SHORT_TERM(zone)) {
-    msrval = replace_bits(msrval, enabled_bits, 47, 48);
+    msrval = replace_bits(msrval, enabled_bits, 47, 47);
   }
   raplcap_log(DEBUG, "raplcap_set_zone_enabled: socket=%"PRIu32", zone=%d, enabled=%d\n", socket, zone, enabled);
-  return write_msr_by_offset(state->fds[socket], msr, msrval);
+  if ((ret = write_msr_by_offset(state->fds[socket], msr, msrval, 0)) == 0) {
+    // try to enable clamping (not supported by all zones or all CPUs)
+    msrval = replace_bits(msrval, enabled_bits, 16, 16);
+    if (HAS_SHORT_TERM(zone)) {
+      msrval = replace_bits(msrval, enabled_bits, 48, 48);
+    }
+    if (write_msr_by_offset(state->fds[socket], msr, msrval, 1)) {
+      raplcap_log(INFO, "Clamping not available for this zone or platform\n");
+    }
+  }
+  return ret;
 }
 
 static void to_raplcap(raplcap_limit* limit, double seconds, double watts) {
@@ -405,14 +501,14 @@ static uint64_t to_msr_power(double watts, double power_units) {
   return p;
 }
 
-int raplcap_get_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
+int raplcap_get_limits(const raplcap* rc, uint32_t socket, raplcap_zone zone,
                        raplcap_limit* limit_long, raplcap_limit* limit_short) {
   double watts;
   double seconds;
   uint64_t msrval;
   const raplcap_msr* state = get_state(socket, rc);
   const off_t msr = zone_to_msr_offset(zone);
-  if (state == NULL || msr < 0 || read_msr_by_offset(state->fds[socket], msr, &msrval)) {
+  if (state == NULL || msr < 0 || read_msr_by_offset(state->fds[socket], msr, &msrval, 0)) {
     return -1;
   }
   // power units specified by the "Power Units" field of MSR_RAPL_POWER_UNIT
@@ -441,12 +537,12 @@ int raplcap_get_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
   return 0;
 }
 
-int raplcap_set_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
+int raplcap_set_limits(const raplcap* rc, uint32_t socket, raplcap_zone zone,
                        const raplcap_limit* limit_long, const raplcap_limit* limit_short) {
   uint64_t msrval;
   const raplcap_msr* state = get_state(socket, rc);
   const off_t msr = zone_to_msr_offset(zone);
-  if (state == NULL || msr < 0 || read_msr_by_offset(state->fds[socket], msr, &msrval)) {
+  if (state == NULL || msr < 0 || read_msr_by_offset(state->fds[socket], msr, &msrval, 0)) {
     return -1;
   }
   if (limit_long != NULL) {
@@ -469,5 +565,5 @@ int raplcap_set_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
       msrval = replace_bits(msrval, to_msr_time(limit_short->seconds, state->time_units), 49, 55);
     }
   }
-  return write_msr_by_offset(state->fds[socket], msr, msrval);
+  return write_msr_by_offset(state->fds[socket], msr, msrval, 0);
 }

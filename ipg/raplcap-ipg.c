@@ -147,7 +147,7 @@ int raplcap_init(raplcap* rc) {
     raplcap_perror(ERROR, "raplcap_init: malloc");
     return -1;
   }
-  if (getEnergyLib(rc->state) || initEnergyLib(rc->state, &nNodes)) {
+  if (getEnergyLib((raplcap_ipg*) rc->state) || initEnergyLib((raplcap_ipg*) rc->state, &nNodes)) {
     raplcap_destroy(rc);
     return -1;
   }
@@ -171,6 +171,7 @@ int raplcap_destroy(raplcap* rc) {
 #endif
   free(state);
   rc->state = NULL;
+  rc->nsockets = 0;
   raplcap_log(DEBUG, "raplcap_destroy: Destroyed\n");
   return 0;
 }
@@ -196,19 +197,26 @@ uint32_t raplcap_get_num_sockets(const raplcap* rc) {
   return nsockets;
 }
 
-static raplcap_ipg* get_state(uint32_t socket, const raplcap* rc) {
+static raplcap_ipg* get_state(const raplcap* rc, uint32_t socket) {
   if (rc == NULL) {
     rc = &rc_default;
   }
-  if (rc->state == NULL || socket >= rc->nsockets) {
+  if (rc->nsockets == 0 || rc->state == NULL) {
+    // unfortunately can't detect if the context just contains garbage
+    raplcap_log(ERROR, "get_state: Context is not initialized\n");
+    errno = EINVAL;
+    return NULL;
+  }
+  if (socket >= rc->nsockets) {
+    raplcap_log(ERROR, "get_state: Socket %"PRIu32" not in range [0, %"PRIu32")\n", socket, rc->nsockets);
     errno = EINVAL;
     return NULL;
   }
   return (raplcap_ipg*) rc->state;
 }
 
-int raplcap_is_zone_supported(uint32_t socket, const raplcap* rc, raplcap_zone zone) {
-  if (get_state(socket, rc) == NULL) {
+int raplcap_is_zone_supported(const raplcap* rc, uint32_t socket, raplcap_zone zone) {
+  if (get_state(rc, socket) == NULL) {
     errno = EINVAL;
     return -1;
   }
@@ -216,7 +224,7 @@ int raplcap_is_zone_supported(uint32_t socket, const raplcap* rc, raplcap_zone z
   return zone == RAPLCAP_ZONE_PACKAGE;
 }
 
-int raplcap_is_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zone) {
+int raplcap_is_zone_enabled(const raplcap* rc, uint32_t socket, raplcap_zone zone) {
   // not supported by IPG
   (void) socket;
   (void) rc;
@@ -225,7 +233,7 @@ int raplcap_is_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zon
   return -1;
 }
 
-int raplcap_set_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zone, int enabled) {
+int raplcap_set_zone_enabled(const raplcap* rc, uint32_t socket, raplcap_zone zone, int enabled) {
   // not supported by IPG
   (void) socket;
   (void) rc;
@@ -235,16 +243,16 @@ int raplcap_set_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zo
   return -1;
 }
 
-int raplcap_get_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
+int raplcap_get_limits(const raplcap* rc, uint32_t socket, raplcap_zone zone,
                        raplcap_limit* limit_long, raplcap_limit* limit_short) {
   int nResult = 0;
   double data[3] = { 0 };
   raplcap_ipg* state;
-  if (raplcap_is_zone_supported(socket, rc, zone) <= 0) {
+  if (raplcap_is_zone_supported(rc, socket, zone) <= 0) {
     return -1;
   }
   // will not be NULL if zone is supported
-  state = get_state(socket, rc);
+  state = get_state(rc, socket);
   // try twice to work around overflow which doesn't affect our functions
   if (!state->pReadSample() || !state->pReadSample()) {
     raplcap_log(ERROR, "raplcap_get_limits: ReadSample\n");
@@ -269,7 +277,7 @@ int raplcap_get_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
   return 0;
 }
 
-int raplcap_set_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
+int raplcap_set_limits(const raplcap* rc, uint32_t socket, raplcap_zone zone,
                        const raplcap_limit* limit_long, const raplcap_limit* limit_short) {
   // not supported by IPG
   (void) socket;

@@ -99,7 +99,7 @@ static void msr_to_raplcap(const struct rapl_limit* rl, raplcap_limit* pl) {
   }
 }
 
-static int check_state(uint32_t socket, const raplcap* rc) {
+static int check_state(const raplcap* rc, uint32_t socket) {
   if (rc == NULL) {
     rc = &rc_default;
   }
@@ -154,6 +154,7 @@ int raplcap_init(raplcap* rc) {
     return 0;
   }
   if ((rc->nsockets = get_libmsr_sockets()) == 0 || maybe_lifecycle_init()) {
+    rc->nsockets = 0;
     return -1;
   }
   rc->state = &global_state;
@@ -172,6 +173,7 @@ int raplcap_destroy(raplcap* rc) {
     return 0;
   }
   rc->state = NULL;
+  rc->nsockets = 0;
   ret = maybe_lifecycle_finish();
   raplcap_log(DEBUG, "raplcap_destroy: Destroyed\n");
   return ret;
@@ -248,17 +250,17 @@ static int msr_get_limits(uint32_t socket, raplcap_zone zone, struct rapl_limit*
   return ret;
 }
 
-int raplcap_is_zone_supported(uint32_t socket, const raplcap* rc, raplcap_zone zone) {
+int raplcap_is_zone_supported(const raplcap* rc, uint32_t socket, raplcap_zone zone) {
   // we have no way to check with libmsr without just trying operations
-  int ret = raplcap_is_zone_enabled(socket, rc, zone) < 0 ? 0 : 1;
+  int ret = raplcap_is_zone_enabled(rc, socket, zone) < 0 ? 0 : 1;
   raplcap_log(DEBUG, "raplcap_is_zone_supported: socket=%"PRIu32", zone=%d, supported=%d\n", socket, zone, ret);
   return ret;
 }
 
-int raplcap_is_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zone) {
+int raplcap_is_zone_enabled(const raplcap* rc, uint32_t socket, raplcap_zone zone) {
   struct rapl_limit l;
   int ret;
-  if (check_state(socket, rc)) {
+  if (check_state(rc, socket)) {
     return -1;
   }
   // libmsr doesn't provide an interface to determine enabled/disabled, so we check the bits directly
@@ -268,21 +270,21 @@ int raplcap_is_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zon
     switch (zone) {
       case RAPLCAP_ZONE_PACKAGE:
       case RAPLCAP_ZONE_PSYS:
-        // check that enabled bits (15 and 47) and clamping bits (16 and 48) are set
-        ret = (l.bits & (0x1800000018000)) == 0x1800000018000;
-        if (!ret && (l.bits & 0x0800000018000) == 0x0800000018000) {
-          raplcap_log(WARN, "Zone is enabled but clamping is not - use raplcap_set_limits(...) to enable clamping\n");
-          ret = 1;
+        // check that enabled bits (15 and 47) are set
+        ret = (l.bits & (0x800000008000)) == 0x800000008000;
+        // check that clamping bits (16 and 48) are set
+        if (ret && (l.bits & 0x1000000010000) != 0x1000000010000) {
+          raplcap_log(INFO, "Zone is enabled but clamping is not\n");
         }
         break;
       case RAPLCAP_ZONE_CORE:
       case RAPLCAP_ZONE_UNCORE:
       case RAPLCAP_ZONE_DRAM:
-        // check that enabled bit 15 and clamping bit 16 are set
-        ret = (l.bits & 0x18000) == 0x18000;
-        if (!ret && (l.bits & 0x08000) == 0x08000) {
-          raplcap_log(WARN, "Zone is enabled but clamping is not - use raplcap_set_limits(...) to enable clamping\n");
-          ret = 1;
+        // check that enabled bit (15) is set
+        ret = (l.bits & 0x8000) == 0x8000;
+        // check that clamping bit (16) is set
+        if (ret && (l.bits & 0x10000) != 0x10000) {
+          raplcap_log(INFO, "Zone is enabled but clamping is not\n");
         }
         break;
       default:
@@ -295,7 +297,7 @@ int raplcap_is_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zon
   return ret;
 }
 
-int raplcap_set_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zone, int enabled) {
+int raplcap_set_zone_enabled(const raplcap* rc, uint32_t socket, raplcap_zone zone, int enabled) {
   // TODO: We can enable a zone by simply writing back its current values, but there's no way to disable it...
   (void) socket;
   (void) rc;
@@ -307,11 +309,11 @@ int raplcap_set_zone_enabled(uint32_t socket, const raplcap* rc, raplcap_zone zo
   return -1;
 }
 
-int raplcap_get_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
+int raplcap_get_limits(const raplcap* rc, uint32_t socket, raplcap_zone zone,
                        raplcap_limit* limit_long, raplcap_limit* limit_short) {
   struct rapl_limit ll, ls;
   int ret;
-  if (check_state(socket, rc)) {
+  if (check_state(rc, socket)) {
     return -1;
   }
   if ((ret = msr_get_limits(socket, zone, &ll, &ls)) == 0) {
@@ -396,11 +398,11 @@ static int msr_set_limits(uint32_t socket, raplcap_zone zone, struct rapl_limit*
   return ret;
 }
 
-int raplcap_set_limits(uint32_t socket, const raplcap* rc, raplcap_zone zone,
+int raplcap_set_limits(const raplcap* rc, uint32_t socket, raplcap_zone zone,
                        const raplcap_limit* limit_long, const raplcap_limit* limit_short) {
   struct rapl_limit ll, ls;
   int ret = 0;
-  if (check_state(socket, rc)) {
+  if (check_state(rc, socket)) {
     return -1;
   }
   // first get values to fill any empty ones; no harm done if the zone doesn't actually use both constraints

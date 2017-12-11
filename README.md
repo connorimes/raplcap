@@ -1,38 +1,51 @@
 # RAPLCap
 
 This project provides a C interface for getting/setting power caps with Intel Running Average Power Limit (RAPL).
-It supports multiple implementations with different backends:
+It supports multiple implementations with different backends, primarily:
 
-* `libraplcap-msr`: Uses [Model-Specific Register](https://en.wikipedia.org/wiki/Model-specific_register) files in the Linux `/dev` filesystem.
-* `libraplcap-powercap`: Uses the [Linux Power Capping Framework](https://www.kernel.org/doc/Documentation/power/powercap/powercap.txt) abstractions in the Linux `/sys` filesystem.
-* `libraplcap-libmsr`: Uses LLNL's [libmsr](https://software.llnl.gov/libmsr) interface.
+* `libraplcap-msr` ([README](msr/README.md)): Uses [Model-Specific Register](https://en.wikipedia.org/wiki/Model-specific_register) files in the `/dev` filesystem (Linux).
+* `libraplcap-powercap` ([README](powercap/README.md)): Uses the [Linux Power Capping Framework](https://www.kernel.org/doc/Documentation/power/powercap/powercap.txt) abstractions in the `/sys` filesystem (Linux).
 
 It also provides binaries for getting/setting RAPL configurations from the command line.
 Each provides the same command line interface, but use different RAPLCap library backends.
 
 * `rapl-configure-msr`
 * `rapl-configure-powercap`
-* `rapl-configure-libmsr`
+
+Experimental backends, which are not documented here in any further detail and may be removed at any time, include:
+
+* `libraplcap-ipg` ([README](ipg/README.md)): Uses Intel&reg; Power Gadget (OSX and Windows).
+* `libraplcap-libmsr` ([README](libmsr/README.md)): Uses LLNL's [libmsr](https://software.llnl.gov/libmsr) interface (Linux).
 
 
 ## Prerequisites
 
 First, you must be using an Intel&reg; processor that supports RAPL - Sandy Bridge (2nd generation Intel&reg; Core) or newer.
 
-Currently only Linux systems are supported.
+Currently only Linux systems are supported by the primary implementations.
 
-This project optionally depends on:
+This project depends on:
 
-* [powercap](https://github.com/powercap/powercap) - backend required to compile and run the `powercap` implementation.
-* [libmsr](https://github.com/LLNL/libmsr/) (>= 2.1) - backend required to compile and run the `libmsr` implementation, most recently tested with release `v0.3.0`.
+* [powercap](https://github.com/powercap/powercap) - backend required to compile and run the `powercap` implementation (or install the [libpowercap-dev](apt:libpowercap-dev) package on recent Debian-based Linux distributions).
 
-If dependencies are not found, CMake will not attempt to compile the implementations that use them.
+If dependencies are not found, backends that require them will not be compiled.
 
 Users are expected to be familiar with basic RAPL capabilities and terminology, like zones (domains) and long/short term power constraints.
 Refer to Intel RAPL documentation for more technical information, especially the *Intel&reg; 64 and IA-32 Architectures Software Developer Manual, Volume 3: System Programming Guide.*
 
 Due to lack of portability in backends and data availability on some systems, the interface does not support discovering processor min/max power caps or thermal design power.
 Users should reference their hardware documentation or other system utilities to discover this information as needed.
+
+
+## Running Average Power Limit
+
+Intel RAPL allows software to configure power caps on hardware components, like processors or main memory.
+Components manage themselves to respect the power cap while attempting to optimize performance.
+Note that power caps are *NOT* the same as power consumption, they only specify an upper bound on power consumption over a time window.
+
+For example, processors use Dynamic Voltage and Frequency Scaling (DVFS) to trade performance and power consumption, where power `P` is proportional to capacitance `C`, the square of the voltage `V`, and clock frequency `f`: `P ~ C * V^2 * f`.
+An increase in frequency usually necessitates an increase in voltage, and vice versa, resulting in a non-linear tradeoff between performance (frequency) and power consumption.
+With RAPL, hardware manages voltage and frequency at finer-grained time intervals and with lower overhead than software-based DVFS controllers.
 
 
 ## Building
@@ -46,12 +59,6 @@ mkdir _build
 cd _build
 cmake ..
 make
-```
-
-When running `cmake`, you may need to set the property `CMAKE_PREFIX_PATH` to the install directory for `libmsr`, e.g.:
-
-``` sh
-cmake .. -DCMAKE_PREFIX_PATH=/path/to/libmsr/install_dir/
 ```
 
 
@@ -84,7 +91,6 @@ To link with an implementation of RAPLCap, get linker information (including tra
 ``` sh
 pkg-config --libs --static raplcap-msr
 pkg-config --libs --static raplcap-powercap
-pkg-config --libs --static raplcap-libmsr
 ```
 
 Or in your Makefile, add to your linker flags one of:
@@ -92,7 +98,6 @@ Or in your Makefile, add to your linker flags one of:
 ``` Makefile
 $(shell pkg-config --libs --static raplcap-msr)
 $(shell pkg-config --libs --static raplcap-powercap)
-$(shell pkg-config --libs --static raplcap-libmsr)
 ```
 
 You may leave off the `--static` option if you built shared object libraries.
@@ -102,7 +107,6 @@ Depending on your install location, you may also need to augment your compiler f
 ``` sh
 pkg-config --cflags raplcap-msr
 pkg-config --cflags raplcap-powercap
-pkg-config --cflags raplcap-libmsr
 ```
 
 
@@ -112,11 +116,7 @@ See the man pages for the `rapl-configure` binaries, or run them with the `-h` o
 
 The [raplcap.h](inc/raplcap.h) header provides the C interface along with detailed function documentation for using the libraries.
 
-For backend-specific runtime dependencies, see the README files in their implementation subdirectories:
-
-* [msr/README.md](msr/README.md)
-* [powercap/README.md](powercap/README.md)
-* [libmsr/README.md](libmsr/README.md)
+For backend-specific runtime dependencies, see the README files in their implementation subdirectories (links above).
 
 The following is a simple example of setting power caps.
 
@@ -145,7 +145,7 @@ The following is a simple example of setting power caps.
   rl_long.watts = 50.0;
   rl_long.seconds = 0.0;
   for (i = 0; i < n; i++) {
-    if (raplcap_set_limits(i, &rc, RAPLCAP_ZONE_PACKAGE, &rl_long, &rl_short)) {
+    if (raplcap_set_limits(&rc, i, RAPLCAP_ZONE_PACKAGE, &rl_long, &rl_short)) {
       perror("raplcap_set_limits");
     }
   }
